@@ -1,0 +1,2 @@
+http_rule_files:
+  - refresh_interval: 30s

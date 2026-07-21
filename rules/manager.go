@@ -343,6 +343,48 @@ func (fl FileLoader) Parse(query string) (parser.Expr, error) {
 	return fl.parser.ParseExpr(query)
 }
 
+// HTTPRuleProvider loads rule groups that were fetched from HTTP endpoints.
+// It is implemented by rules/httprules.Provider.
+type HTTPRuleProvider interface {
+	Load(url string) (*rulefmt.RuleGroups, []error)
+}
+
+// NewFileLoader returns a FileLoader configured with the given parser and logger.
+func NewFileLoader(p parser.Parser, logger *slog.Logger) FileLoader {
+	return FileLoader{parser: p, logger: logger}
+}
+
+// HTTPGroupLoader is a GroupLoader that dispatches to a FileLoader for local
+// file paths and to an HTTPRuleProvider for HTTP(S) URLs. This lets the rule
+// manager treat file paths and HTTP endpoints uniformly as "identifiers".
+type HTTPGroupLoader struct {
+	FileLoader
+	httpProvider HTTPRuleProvider
+}
+
+// NewHTTPGroupLoader returns an HTTPGroupLoader with the given file loader and
+// HTTP provider. Pass nil for httpProvider when there are no HTTP rule files
+// configured; in that case the loader behaves exactly like FileLoader.
+func NewHTTPGroupLoader(fileLoader FileLoader, httpProvider HTTPRuleProvider) HTTPGroupLoader {
+	return HTTPGroupLoader{FileLoader: fileLoader, httpProvider: httpProvider}
+}
+
+// Load implements GroupLoader. HTTP(S) URLs are served from the HTTP provider's
+// cache; all other identifiers are treated as file paths and delegated to the
+// embedded FileLoader (unchanged behaviour).
+func (l HTTPGroupLoader) Load(identifier string, ignoreUnknownFields bool, nameValidationScheme model.ValidationScheme) (*rulefmt.RuleGroups, []error) {
+	if IsHTTPRuleIdentifier(identifier) && l.httpProvider != nil {
+		return l.httpProvider.Load(identifier)
+	}
+	return l.FileLoader.Load(identifier, ignoreUnknownFields, nameValidationScheme)
+}
+
+// IsHTTPRuleIdentifier reports whether the given identifier should be treated
+// as an HTTP(S) endpoint rather than a local file path.
+func IsHTTPRuleIdentifier(identifier string) bool {
+	return strings.HasPrefix(identifier, "http://") || strings.HasPrefix(identifier, "https://")
+}
+
 // LoadGroups reads groups from a list of files.
 func (m *Manager) LoadGroups(
 	interval time.Duration, externalLabels labels.Labels, externalURL string, groupEvalIterationFunc GroupEvalIterationFunc, ignoreUnknownFields bool, filenames ...string,

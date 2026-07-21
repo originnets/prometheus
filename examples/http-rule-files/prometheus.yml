@@ -1,0 +1,48 @@
+# Example Prometheus configuration that loads alerting rules from an HTTP
+# endpoint via http_rule_files.
+#
+# Start the test rule server first:
+#
+#   cd examples/http-rule-files
+#   go run .
+#
+# Then start Prometheus with this config:
+#
+#   ./prometheus --config.file=examples/http-rule-files/prometheus.yml \
+#                --storage.tsdb.path=data/
+#
+# Verify rules are loaded:
+#
+#   curl http://localhost:9090/api/v1/rules
+#
+# Trigger a hot-reload by toggling the rule variant:
+#
+#   curl http://localhost:9091/toggle
+#
+# Within the next refresh_interval (15s) Prometheus will re-fetch the rules
+# and apply the changes without a restart or /-/reload.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+# Traditional file-based rules still work alongside http_rule_files.
+# rule_files:
+#   - "rules/*.yml"
+
+# HTTP-based rule files. Each endpoint is polled at refresh_interval and
+# hot-reloaded when the response body changes (SHA256 comparison).
+http_rule_files:
+  - url: http://localhost:9091/rules
+    refresh_interval: 15s
+
+scrape_configs:
+  # Self-scrape so the "up" metric exists for the ServiceDown alert.
+  - job_name: prometheus
+    static_configs:
+      - targets: [localhost:9090]
+
+  # Example target that is always down, to fire the ServiceDown alert.
+  - job_name: down-service
+    static_configs:
+      - targets: [localhost:9]

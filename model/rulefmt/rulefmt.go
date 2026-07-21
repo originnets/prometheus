@@ -155,6 +155,18 @@ func (g *RuleGroups) Validate(node ruleGroups, nameValidationScheme model.Valida
 	return errs
 }
 
+// ValidateGroups validates the rule groups without requiring yaml node
+// information. It is intended for rule groups loaded from sources other than
+// YAML files (for example, HTTP endpoints returning JSON). Error messages
+// produced by this method will not contain line or column numbers.
+func (g *RuleGroups) ValidateGroups(nameValidationScheme model.ValidationScheme, p parser.Parser) []error {
+	node := ruleGroups{Groups: make([]RuleGroupNode, len(g.Groups))}
+	for i := range g.Groups {
+		node.Groups[i].Rules = make([]RuleNode, len(g.Groups[i].Rules))
+	}
+	return g.Validate(node, nameValidationScheme, p)
+}
+
 // RuleGroup is a list of sequentially evaluated recording and alerting rules.
 type RuleGroup struct {
 	Name        string            `yaml:"name"`

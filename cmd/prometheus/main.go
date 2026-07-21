@@ -71,6 +71,7 @@ import (
 	"github.com/prometheus/prometheus/promql"
 	"github.com/prometheus/prometheus/promql/parser"
 	"github.com/prometheus/prometheus/rules"
+	"github.com/prometheus/prometheus/rules/httprules"
 	"github.com/prometheus/prometheus/scrape"
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/storage/remote"
@@ -976,6 +977,11 @@ func main() {
 
 		queryEngine *promql.Engine
 		ruleManager *rules.Manager
+
+		// httpRuleProvider fetches rule groups from HTTP endpoints configured in
+		// http_rule_files. It is nil in agent mode or when no http_rule_files are
+		// configured.
+		httpRuleProvider *httprules.Provider
 	)
 
 	if !agentMode {
@@ -1001,7 +1007,24 @@ func main() {
 
 		queryEngine = promql.NewEngine(opts)
 
-		ruleManager = rules.NewManager(&rules.ManagerOptions{
+		// Build the HTTP rule provider for http_rule_files. Each endpoint is
+		// polled periodically and cached rules are served to the rule manager
+		// via the HTTPGroupLoader. The provider's onUpdate callback triggers a
+		// rule-only reload using the most recently applied config.
+		if len(cfgFile.HTTPRuleFiles) > 0 {
+			httpRuleProvider, err = httprules.NewProvider(
+				cfgFile.HTTPRuleFiles,
+				promqlParser,
+				cfgFile.GlobalConfig.MetricNameValidationScheme,
+				logger.With("component", "http rule provider"),
+			)
+			if err != nil {
+				logger.Error("Failed to create HTTP rule provider", "err", err)
+				os.Exit(1)
+			}
+		}
+
+		managerOpts := &rules.ManagerOptions{
 			NameValidationScheme:   cfgFile.GlobalConfig.MetricNameValidationScheme,
 			Appendable:             fanoutStorage,
 			Queryable:              localStorage,
@@ -1021,7 +1044,18 @@ func main() {
 			},
 			FeatureRegistry: features.DefaultRegistry,
 			Parser:          promqlParser,
-		})
+		}
+		// When HTTP rule files are configured, wrap the default FileLoader with
+		// an HTTPGroupLoader so the manager can load from both files and HTTP
+		// endpoints. Without http_rule_files the manager keeps using the
+		// default FileLoader, preserving the existing behaviour exactly.
+		if httpRuleProvider != nil {
+			managerOpts.GroupLoader = rules.NewHTTPGroupLoader(
+				rules.NewFileLoader(promqlParser, logger.With("component", "rule manager")),
+				httpRuleProvider,
+			)
+		}
+		ruleManager = rules.NewManager(managerOpts)
 	}
 
 	scraper.Set(scrapeManager)
@@ -1074,6 +1108,48 @@ func main() {
 
 	// This is passed to ruleManager.Update().
 	externalURL := cfg.web.ExternalURL.String()
+
+	// appliedCfg tracks the most recently applied configuration so that the
+	// HTTP rule provider's onUpdate callback can re-run the rules reloader
+	// against the current config when an HTTP endpoint reports new content.
+	var appliedCfg *config.Config
+
+	// rulesReloader is the function backing the "rules" reloader entry below.
+	// It is also invoked by the HTTP rule provider's onUpdate callback so that
+	// changes fetched from HTTP endpoints hot-apply without requiring a full
+	// config reload.
+	rulesReloader := func(cfg *config.Config) error {
+		if agentMode {
+			// No-op in Agent mode
+			return nil
+		}
+
+		appliedCfg = cfg
+
+		// Get all rule files matching the configured paths.
+		var files []string
+		for _, pat := range cfg.RuleFiles {
+			fs, err := filepath.Glob(pat)
+			if err != nil {
+				// The only error can be a bad pattern.
+				return fmt.Errorf("error retrieving rule files for %s: %w", pat, err)
+			}
+			files = append(files, fs...)
+		}
+		// Append HTTP rule URLs. The HTTPGroupLoader dispatches by URL prefix
+		// (http://, https://) and serves cached content from the HTTP rule
+		// provider; non-HTTP identifiers fall through to the FileLoader.
+		for _, hrf := range cfg.HTTPRuleFiles {
+			files = append(files, hrf.URL)
+		}
+		return ruleManager.Update(
+			time.Duration(cfg.GlobalConfig.EvaluationInterval),
+			files,
+			cfg.GlobalConfig.ExternalLabels,
+			externalURL,
+			nil,
+		)
+	}
 
 	reloaders := []reloader{
 		{
@@ -1157,35 +1233,12 @@ func main() {
 				return discoveryManagerNotify.ApplyConfig(c)
 			},
 		}, {
-			name: "rules",
-			reloader: func(cfg *config.Config) error {
-				if agentMode {
-					// No-op in Agent mode
-					return nil
-				}
-
-				// Get all rule files matching the configuration paths.
-				var files []string
-				for _, pat := range cfg.RuleFiles {
-					fs, err := filepath.Glob(pat)
-					if err != nil {
-						// The only error can be a bad pattern.
-						return fmt.Errorf("error retrieving rule files for %s: %w", pat, err)
-					}
-					files = append(files, fs...)
-				}
-				return ruleManager.Update(
-					time.Duration(cfg.GlobalConfig.EvaluationInterval),
-					files,
-					cfg.GlobalConfig.ExternalLabels,
-					externalURL,
-					nil,
-				)
-			},
-		}, {
-			name:     "tracing",
-			reloader: tracingManager.ApplyConfig,
-		},
+		name:     "rules",
+		reloader: rulesReloader,
+	}, {
+		name:     "tracing",
+		reloader: tracingManager.ApplyConfig,
+	},
 	}
 
 	prometheus.MustRegister(configSuccess)
@@ -1290,6 +1343,34 @@ func main() {
 			func(error) {
 				logger.Info("Stopping rule manager manager...")
 				ruleManager.Stop()
+			},
+		)
+	}
+	if !agentMode && httpRuleProvider != nil {
+		// HTTP rule provider. Periodically polls each configured HTTP endpoint
+		// for rule groups and hot-applies changes via rulesReloader without
+		// requiring a full config reload.
+		ctxHTTPRules, cancelHTTPRules := context.WithCancel(context.Background())
+		g.Add(
+			func() error {
+				<-reloadReady.C
+				onUpdate := func() {
+					if appliedCfg == nil {
+						// No config applied yet; nothing to reload.
+						return
+					}
+					logger.Info("HTTP rule change detected, reloading rules")
+					if err := rulesReloader(appliedCfg); err != nil {
+						logger.Error("Error applying HTTP rule update", "err", err)
+					}
+				}
+				httpRuleProvider.Run(ctxHTTPRules, onUpdate)
+				logger.Info("HTTP rule provider stopped")
+				return nil
+			},
+			func(error) {
+				logger.Info("Stopping HTTP rule provider...")
+				cancelHTTPRules()
 			},
 		)
 	}

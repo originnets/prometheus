@@ -1,0 +1,11 @@
+rule_files:
+  - "first.rules"
+  - "my/*.rules"
+
+http_rule_files:
+  - url: http://example.com/rules1.json
+    refresh_interval: 30s
+  - url: https://example.com/rules2.json
+    basic_auth:
+      username: alice
+      password: secret

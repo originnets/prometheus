@@ -6,6 +6,7 @@
 
 /prometheus
 /promtool
+/prometheus-linux-amd64
 benchmark.txt
 /data
 /data-agent

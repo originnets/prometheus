@@ -2734,6 +2734,18 @@ var expectedErrors = []struct {
 		filename: "tsdb_chunk_encoding_floats_wrong_case_xor2.bad.yml",
 		errMsg:   `'storage.tsdb.chunk_encoding.floats' must be 'xor' or 'xor2', or the field must be omitted entirely, got "XOR2"`,
 	},
+	{
+		filename: "http_rule_files.bad.duplicate_url.yml",
+		errMsg:   `found duplicate http_rule_files URL`,
+	},
+	{
+		filename: "http_rule_files.bad.url_scheme.yml",
+		errMsg:   `URL scheme must be 'http' or 'https'`,
+	},
+	{
+		filename: "http_rule_files.bad.missing_url.yml",
+		errMsg:   `URL is missing`,
+	},
 }
 
 func TestBadConfigs(t *testing.T) {
@@ -2813,6 +2825,9 @@ func TestAgentMode(t *testing.T) {
 
 	_, err = LoadFile("testdata/agent_mode.with_rule_files.yml", true, promslog.NewNopLogger())
 	require.ErrorContains(t, err, "field rule_files is not allowed in agent mode")
+
+	_, err = LoadFile("testdata/agent_mode.with_http_rule_files.yml", true, promslog.NewNopLogger())
+	require.ErrorContains(t, err, "field http_rule_files is not allowed in agent mode")
 
 	_, err = LoadFile("testdata/agent_mode.with_remote_reads.yml", true, promslog.NewNopLogger())
 	require.ErrorContains(t, err, "field remote_read is not allowed in agent mode")

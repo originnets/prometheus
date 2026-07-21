@@ -1,0 +1,3 @@
+http_rule_files:
+  - url: http://example.com/rules.json
+  - url: http://example.com/rules.json

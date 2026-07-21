@@ -39,6 +39,7 @@ import (
 	"github.com/prometheus/prometheus/discovery"
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/model/relabel"
+	"github.com/prometheus/prometheus/rules/httprules"
 	"github.com/prometheus/prometheus/storage/remote/azuread"
 	"github.com/prometheus/prometheus/storage/remote/googleiam"
 )
@@ -145,6 +146,10 @@ func LoadFile(filename string, agentMode bool, logger *slog.Logger) (*Config, er
 
 		if len(cfg.RuleFiles) > 0 {
 			return nil, errors.New("field rule_files is not allowed in agent mode")
+		}
+
+		if len(cfg.HTTPRuleFiles) > 0 {
+			return nil, errors.New("field http_rule_files is not allowed in agent mode")
 		}
 
 		if len(cfg.RemoteReadConfigs) > 0 {
@@ -290,14 +295,15 @@ var (
 
 // Config is the top-level configuration for Prometheus's config files.
 type Config struct {
-	GlobalConfig      GlobalConfig    `yaml:"global"`
-	Runtime           RuntimeConfig   `yaml:"runtime,omitempty"`
-	AlertingConfig    AlertingConfig  `yaml:"alerting,omitempty"`
-	RuleFiles         []string        `yaml:"rule_files,omitempty"`
-	ScrapeConfigFiles []string        `yaml:"scrape_config_files,omitempty"`
-	ScrapeConfigs     []*ScrapeConfig `yaml:"scrape_configs,omitempty"`
-	StorageConfig     StorageConfig   `yaml:"storage,omitempty"`
-	TracingConfig     TracingConfig   `yaml:"tracing,omitempty"`
+	GlobalConfig      GlobalConfig                   `yaml:"global"`
+	Runtime           RuntimeConfig                  `yaml:"runtime,omitempty"`
+	AlertingConfig    AlertingConfig                 `yaml:"alerting,omitempty"`
+	RuleFiles         []string                       `yaml:"rule_files,omitempty"`
+	HTTPRuleFiles     []httprules.HTTPRuleFileConfig `yaml:"http_rule_files,omitempty"`
+	ScrapeConfigFiles []string                       `yaml:"scrape_config_files,omitempty"`
+	ScrapeConfigs     []*ScrapeConfig                `yaml:"scrape_configs,omitempty"`
+	StorageConfig     StorageConfig                  `yaml:"storage,omitempty"`
+	TracingConfig     TracingConfig                  `yaml:"tracing,omitempty"`
 
 	RemoteWriteConfigs []*RemoteWriteConfig `yaml:"remote_write,omitempty"`
 	RemoteReadConfigs  []*RemoteReadConfig  `yaml:"remote_read,omitempty"`
@@ -314,6 +320,9 @@ func (c *Config) SetDirectory(dir string) {
 	c.TracingConfig.SetDirectory(dir)
 	for i, file := range c.RuleFiles {
 		c.RuleFiles[i] = config.JoinDir(dir, file)
+	}
+	for i := range c.HTTPRuleFiles {
+		c.HTTPRuleFiles[i].SetDirectory(dir)
 	}
 	for i, file := range c.ScrapeConfigFiles {
 		c.ScrapeConfigFiles[i] = config.JoinDir(dir, file)
@@ -426,6 +435,14 @@ func (c *Config) UnmarshalYAML(unmarshal func(any) error) error {
 		if !patRulePath.MatchString(rf) {
 			return fmt.Errorf("invalid rule file path %q", rf)
 		}
+	}
+
+	httpRuleURLs := make(map[string]struct{}, len(c.HTTPRuleFiles))
+	for _, hrf := range c.HTTPRuleFiles {
+		if _, ok := httpRuleURLs[hrf.URL]; ok {
+			return fmt.Errorf("found duplicate http_rule_files URL %q", hrf.URL)
+		}
+		httpRuleURLs[hrf.URL] = struct{}{}
 	}
 
 	for _, sf := range c.ScrapeConfigFiles {
