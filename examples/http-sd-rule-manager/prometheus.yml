@@ -1,0 +1,64 @@
+# Example Prometheus configuration that uses both http_sd and http_rule_files
+# backed by the http-sd-rule-manager service.
+#
+# Start the manager first:
+#
+#   cd examples/http-sd-rule-manager
+#   go run .
+#
+# Then start Prometheus:
+#
+#   ./prometheus --config.file=examples/http-sd-rule-manager/prometheus.yml \
+#                --storage.tsdb.path=data/
+#
+# The manager pre-seeds two documents named "default" on first run:
+#   - data/sd/default.json     -> service discovery target groups
+#   - data/rules/default.json  -> rule groups (ServiceDown alert)
+#
+# Manage them via the RESTful API:
+#
+#   # List
+#   curl http://localhost:9092/api/v1/sd
+#   curl http://localhost:9092/api/v1/rules
+#
+#   # Read
+#   curl http://localhost:9092/api/v1/sd/default
+#   curl http://localhost:9092/api/v1/rules/default
+#
+#   # Create a new SD file with two target groups
+#   curl -X POST http://localhost:9092/api/v1/sd/web \
+#     -H 'Content-Type: application/json' \
+#     -d '[{"labels":{"job":"web"},"targets":["10.0.0.1:9090","10.0.0.2:9090"]}]'
+#
+#   # Update the rule file: add a recording rule
+#   curl -X PUT http://localhost:9092/api/v1/rules/default \
+#     -H 'Content-Type: application/json' \
+#     -d '[{"name":"service-health","interval":"30s","rules":[{"alert":"ServiceDown","expr":"up == 0","for":"1m","labels":{"severity":"warning"}}]},{"name":"recordings","interval":"1m","rules":[{"record":"job:up_ratio","expr":"avg by (job) (up)"}]}]'
+#
+#   # Delete
+#   curl -X DELETE http://localhost:9092/api/v1/sd/web
+#
+# Within the next refresh_interval (15s) Prometheus re-fetches the affected
+# endpoint and applies the changes without a restart or /-/reload.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+# HTTP-based rule files. Each endpoint is polled at refresh_interval and
+# hot-reloaded when the response body changes (SHA256 comparison).
+http_rule_files:
+  - url: http://localhost:9092/rules/default
+    refresh_interval: 15s
+
+scrape_configs:
+  # http_sd: targets are discovered from the manager's /sd/{name} endpoint.
+  - job_name: http_sd_managed
+    http_sd_configs:
+      - url: http://localhost:9092/sd/default
+        refresh_interval: 15s
+
+  # Self-scrape so the "up" metric exists for the ServiceDown alert.
+  - job_name: prometheus
+    static_configs:
+      - targets: [localhost:9090]
